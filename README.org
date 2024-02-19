@@ -1,0 +1,104 @@
+#+TITLE: Building a RAG Application with LangChain
+* Basic RAG with LangChain and Ollama
+** Environment Setup
+I use my standard setup, with a dedicated conda environment for this project,
+specified with the direnv layout feature. Required libraries can be installed
+with:
+
+#+begin_src shell
+pip3 install -r requirements.txt
+#+end_src
+
+Note that my .envrc is encrypted with [[https://www.agwa.name/projects/git-crypt/][git-crypt]].
+
+** Using a Local LLM with Ollama
+Ollama allows us to run open-source LLMs on local machines. This is useful for
+enhanced privacy since one's private data is never shared with LLM providers.
+
+#+begin_src python :tangle main.py
+# from langchain_community.llms import Ollama
+# llm = Ollama(model="mixtral:latest")
+# response = llm.invoke("What topics must one know to write GenAI applications?")
+# print(response)
+
+#+end_src
+
+** Retrieval Augmented Generation
+RAG is the process of augmenting an LLM prompt with relevant context drawn from
+one or more documents. Typically, documents are broken down into chunks (which
+may optionally overlap) of a certain size. These chunks are then split into
+tokens and converted into vectors of real numbers in a process called embedding.
+These vectors may be stored in a vector database or index. Later, a query may
+also be converted to a vector embedding which can be used to perform a
+similarity search against the index. The top matches may be retrieved and added
+to the context of an LLM prompt, along with the prompt for the model.
+
+*** Loading Documents
+The [[https://python.langchain.com/docs/modules/data_connection/document_loaders/][Document Loader]] abstraction presents a unified interface for loading various
+file types, including plain text, Markdown, JSON, and more. The constructor
+identifies the documents to load, and the load() method does the actual work.
+
+#+begin_src python :tangle index.py
+from langchain_community.document_loaders import DirectoryLoader
+from langchain_community.document_loaders import UnstructuredOrgModeLoader
+directory = "/Users/christian/Documents/personal/notes/content/roam/"
+loader = DirectoryLoader(directory, glob="**/*.org", use_multithreading=True,
+                         loader_cls=UnstructuredOrgModeLoader)
+documents = loader.load()
+print(f"Loaded {len(documents)} org-mode documents.")
+#+end_src
+
+*** Splitting Documents into Chunks
+[[https://python.langchain.com/docs/modules/data_connection/document_transformers/][Text Splitters]] break long documents into smaller chunks so we can pass them into
+an LLM context window.
+**** Types of Splitters
+- recursive :: splits on user-defined chars, keeps related chunks next to each
+  other.
+- token :: splits text on tokens
+- character :: splits on user-defined chars
+- semantic chunker :: splits on sentences, then combines adjacent ones if they
+  are semantically similar enough
+
+#+begin_src python :tangle index.py
+from langchain.text_splitter import NLTKTextSplitter
+splitter = NLTKTextSplitter(chunk_size=1000, chunk_overlap=30)
+chunks = splitter.split_documents(documents)
+print(f"Split into {len(chunks)} chunks.")
+#+end_src
+*** Embedding into a Vector Store
+Use the embeddings from Ollama to represent text as vectors.
+
+#+begin_src python :tangle index.py
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+collection = "org-rag"
+embeddings = OllamaEmbeddings(model="mixtral:latest", show_progress=True)
+db = Chroma(embedding=embeddings, collection_name="org-rag",
+            persist_directory=f"{directory}/.chroma")
+db.add_documents(chunks)
+#+end_src
+
+*** Retrieval
+Use the vector store to find relevant documents.
+#+begin_src python :tangle retrieval.py
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+
+collection = "org-rag"
+directory =  "/Users/christian/Documents/personal/notes/content/roam/"
+index = f"{directory}/.chroma"
+
+embeddings = OllamaEmbeddings(model="mixtral:latest")
+db = Chroma("org-rag", embeddings, persist_directory=index)
+
+query = input("user> ")
+results = db.search(query, "mmr", fetch_k=10, lambda_mult=0.75)
+
+for doc in results:
+    print("*" * 80)
+    print(f"file: {doc.metadata['source']}, length: {len(doc.page_content)}")
+    print(f"content: {doc.page_content}\n\n" )
+#+end_src
+
+I'm not thrilled with these results. The chunks are very small and anecdotally
+not the most relevant. I'd like to feed more context to an LLM.
