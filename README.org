@@ -34,12 +34,14 @@ from langchain_community.document_loaders import DirectoryLoader, UnstructuredOr
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain.retrievers import ParentDocumentRetriever
 import os
 
 class OrgModeDocumentStore:
   def __init__(self, collection, directory, model="mixtral:latest",
                search_type="mmr", mmr_diversity=0.75,
-               num_search_results=5, show_progress=True):
+               num_search_results=5, show_progress=False,
+               silent_errors=False):
     self.collection = collection
     self.directory = directory
     if not os.path.exists(directory):
@@ -50,7 +52,9 @@ class OrgModeDocumentStore:
       os.mkdir(self.index_directory)
 
     self.loader = DirectoryLoader(directory, glob="**/*.org", use_multithreading=True,
-                                  loader_cls=UnstructuredOrgModeLoader)
+                                  silent_errors=silent_errors,
+                                  loader_cls=UnstructuredOrgModeLoader,
+                                  loader_kwargs={"mode": "single"})
 
     self.search_type = search_type
     self.k = num_search_results
@@ -82,11 +86,6 @@ class OrgModeDocumentStore:
     "Loads all org-mode documents found under the given directory recursively."
     self.documents = self.loader.load()
 
-  def chunked_documents(self, overlap=128):
-    "Returns the loaded documents split into chunks."
-    splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=overlap)
-    return splitter.transform_documents(self.documents)
-
   def add_documents(self, docs):
     "Adds the given docs to the Chroma vectorstore and returns the document ids."
     return self.db.add_documents(docs)
@@ -102,23 +101,28 @@ class OrgModeDocumentStore:
   def create_index(self):
     "Creates the index from the loaded documents. This should only be run once."
     self.load()
-    chunks = self.chunked_documents()
-    print(f"Indexing {len(chunks)} chunks of {len(self.documents)} documents.")
-    return self.add_documents(chunks)
+    if len(self.documents) > 0:
+      print(f"Indexing {len(self.documents)} documents.")
+      return self.add_documents(self.documents)
 
   # query
+  def print_documents(self):
+    "Print the list of all documents."
+    self.load()
+    for d in self.documents:
+      print(d.metadata['source'])
+
   def similarity_search(self, query):
     "Search the vectorstore for docs relevant to the query."
     return self.db.similarity_search(query, self.k)
 
   def mmr_search(self, query):
+    "Executes max marginal relevance search for the query."
     return self.db.max_marginal_relevance_search(query, k=self.k, lambda_mult=self.diversity)
 
   def as_retriever(self):
     "Returns a retriever for this vectorstore."
-    return self.db.as_retriever(search_type=self.search_type,
-                                search_kwargs={'k': self.k,
-                                               'lambda_mult': self.diversity})
+    return self.db.as_retriever()
 #+end_src
 
 *** Loading and Indexing (Chunked) Documents
@@ -141,11 +145,13 @@ an LLM context window.
 from orgstore import OrgModeDocumentStore
 collection = "org-rag"
 directory = "/Users/christian/Documents/personal/notes/content/roam/"
-store = OrgModeDocumentStore(collection=collection, directory=directory)
+store = OrgModeDocumentStore(collection=collection, directory=directory, show_progress=True)
 document_ids = store.create_index()
-data = zip(document_ids, store.documents)
-for id, doc in data:
-  print(f"{id}: {doc.metadata['source']}")
+print(f"create_index: {document_ids}")
+
+# data = zip(document_ids, store.documents)
+# for id, doc in data:
+#   print(f"{id}: {doc.metadata['source']}")
 #+end_src
 
 *** Retrieval
@@ -154,22 +160,28 @@ Use the vector store to find relevant documents.
 from orgstore import OrgModeDocumentStore
 collection = "org-rag"
 directory = "/Users/christian/Documents/personal/notes/content/roam/"
-store = OrgModeDocumentStore(collection=collection, directory=directory)
+store = OrgModeDocumentStore(collection=collection, directory=directory, silent_errors=True)
 
 i, query = 1, ""
-print("Enter search query at the prompt or type 'quit' to exit.")
-while not query == "quit":
+print("Enter search query at the prompt or type '?list' for docs, or '?quit' to exit.\n")
+while not query.lower() == "?quit":
   query = input(f"{i}> ")
-  if query == "quit":
+  if query == "?quit":
     print("Goodbye.")
+  elif query == "?list":
+    i += 1
+    store.print_documents()
   else:
     i += 1
-    results = store.mmr_search(query)
+    #results = store.as_retriever().get_relevant_documents(query)
+    #results = store.mmr_search(query)
+    results = store.similarity_search(query)
     for doc in results:
-      print(f"file: {doc.metadata['source']}")
-      print(f"length: {len(doc.page_content)}")
-      print(f"content: {doc.page_content}\n" )
-
+      print(f"file: {doc.metadata['source']}, length: {len(doc.page_content)}")
+      display = input("Display page content? (y|n)> ")
+      if display.lower() == "y":
+        print(f"content: {doc.page_content}\n" )
+        print("-" * 80)
 #+end_src
 
 I'm not thrilled with these results. The chunks are very small and anecdotally
