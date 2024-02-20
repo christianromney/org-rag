@@ -15,14 +15,6 @@ Note that my .envrc is encrypted with [[https://www.agwa.name/projects/git-crypt
 Ollama allows us to run open-source LLMs on local machines. This is useful for
 enhanced privacy since one's private data is never shared with LLM providers.
 
-#+begin_src python :tangle main.py
-# from langchain_community.llms import Ollama
-# llm = Ollama(model="mixtral:latest")
-# response = llm.invoke("What topics must one know to write GenAI applications?")
-# print(response)
-
-#+end_src
-
 ** Retrieval Augmented Generation
 RAG is the process of augmenting an LLM prompt with relevant context drawn from
 one or more documents. Typically, documents are broken down into chunks (which
@@ -33,25 +25,111 @@ also be converted to a vector embedding which can be used to perform a
 similarity search against the index. The top matches may be retrieved and added
 to the context of an LLM prompt, along with the prompt for the model.
 
-*** Loading Documents
+*** OrgModeDocumentStore class
+This Python class organizes and wraps LangChain classes to provide a simplified
+RAG interface over org-mode documents.
+
+#+begin_src python :tangle orgstore.py
+from langchain_community.document_loaders import DirectoryLoader, UnstructuredOrgModeLoader
+from langchain.text_splitter import SentenceTransformersTokenTextSplitter
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+import os
+
+class OrgModeDocumentStore:
+  def __init__(self, collection, directory, model="mixtral:latest",
+               search_type="mmr", mmr_diversity=0.75,
+               num_search_results=5, show_progress=True):
+    self.collection = collection
+    self.directory = directory
+    if not os.path.exists(directory):
+      raise RuntimeError(f"Directory {directory} does not exist.")
+
+    self.index_directory = os.path.join(directory, ".chroma")
+    if not os.path.exists(self.index_directory):
+      os.mkdir(self.index_directory)
+
+    self.loader = DirectoryLoader(directory, glob="**/*.org", use_multithreading=True,
+                                  loader_cls=UnstructuredOrgModeLoader)
+
+    self.search_type = search_type
+    self.k = num_search_results
+    self.diversity = mmr_diversity
+
+    self.model = model
+    self.embeddings = OllamaEmbeddings(model=model, show_progress=show_progress)
+    self.db = Chroma(collection_name=collection,
+                     embedding_function=self.embeddings,
+                     persist_directory=self.index_directory)
+
+  def __repr__(self):
+    return f"""
+    OrgModeDocumentStore(
+      collection={self.collection!r},
+      directory={self.directory!r},
+      index_directory={self.index_directory!r},
+      loader={self.loader!r},
+      embeddings={self.embeddings!r},
+      model={self.model!r},
+      db={self.db!r},
+      search_type={self.search_type!r},
+      k={self.k!r},
+      diversity={self.diversity!r}
+    )"""
+
+  # indexing management
+  def load(self):
+    "Loads all org-mode documents found under the given directory recursively."
+    self.documents = self.loader.load()
+
+  def chunked_documents(self, overlap=128):
+    "Returns the loaded documents split into chunks."
+    splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=overlap)
+    return splitter.transform_documents(self.documents)
+
+  def add_documents(self, docs):
+    "Adds the given docs to the Chroma vectorstore and returns the document ids."
+    return self.db.add_documents(docs)
+
+  def update_document(self, id, doc):
+    "Updates the single document identified by the id."
+    return self.db.update_document(id, doc)
+
+  def update_documents(self, ids, docs):
+    "Updates the documents identified by the given ids."
+    return self.db.update_documents(ids, docs)
+
+  def create_index(self):
+    "Creates the index from the loaded documents. This should only be run once."
+    self.load()
+    chunks = self.chunked_documents()
+    print(f"Indexing {len(chunks)} chunks of {len(self.documents)} documents.")
+    return self.add_documents(chunks)
+
+  # query
+  def similarity_search(self, query):
+    "Search the vectorstore for docs relevant to the query."
+    return self.db.similarity_search(query, self.k)
+
+  def mmr_search(self, query):
+    return self.db.max_marginal_relevance_search(query, k=self.k, lambda_mult=self.diversity)
+
+  def as_retriever(self):
+    "Returns a retriever for this vectorstore."
+    return self.db.as_retriever(search_type=self.search_type,
+                                search_kwargs={'k': self.k,
+                                               'lambda_mult': self.diversity})
+#+end_src
+
+*** Loading and Indexing (Chunked) Documents
 The [[https://python.langchain.com/docs/modules/data_connection/document_loaders/][Document Loader]] abstraction presents a unified interface for loading various
 file types, including plain text, Markdown, JSON, and more. The constructor
 identifies the documents to load, and the load() method does the actual work.
 
-#+begin_src python :tangle index.py
-from langchain_community.document_loaders import DirectoryLoader
-from langchain_community.document_loaders import UnstructuredOrgModeLoader
-directory = "/Users/christian/Documents/personal/notes/content/roam/"
-loader = DirectoryLoader(directory, glob="**/*.org", use_multithreading=True,
-                         loader_cls=UnstructuredOrgModeLoader)
-documents = loader.load()
-print(f"Loaded {len(documents)} org-mode documents.")
-#+end_src
-
-*** Splitting Documents into Chunks
+**** Splitting Documents into Chunks
 [[https://python.langchain.com/docs/modules/data_connection/document_transformers/][Text Splitters]] break long documents into smaller chunks so we can pass them into
 an LLM context window.
-**** Types of Splitters
+***** Types of Splitters
 - recursive :: splits on user-defined chars, keeps related chunks next to each
   other.
 - token :: splits text on tokens
@@ -60,44 +138,38 @@ an LLM context window.
   are semantically similar enough
 
 #+begin_src python :tangle index.py
-from langchain.text_splitter import NLTKTextSplitter
-splitter = NLTKTextSplitter(chunk_size=1000, chunk_overlap=30)
-chunks = splitter.split_documents(documents)
-print(f"Split into {len(chunks)} chunks.")
-#+end_src
-*** Embedding into a Vector Store
-Use the embeddings from Ollama to represent text as vectors.
-
-#+begin_src python :tangle index.py
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
+from orgstore import OrgModeDocumentStore
 collection = "org-rag"
-embeddings = OllamaEmbeddings(model="mixtral:latest", show_progress=True)
-db = Chroma(embedding=embeddings, collection_name="org-rag",
-            persist_directory=f"{directory}/.chroma")
-db.add_documents(chunks)
+directory = "/Users/christian/Documents/personal/notes/content/roam/"
+store = OrgModeDocumentStore(collection=collection, directory=directory)
+document_ids = store.create_index()
+data = zip(document_ids, store.documents)
+for id, doc in data:
+  print(f"{id}: {doc.metadata['source']}")
 #+end_src
 
 *** Retrieval
 Use the vector store to find relevant documents.
 #+begin_src python :tangle retrieval.py
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
-
+from orgstore import OrgModeDocumentStore
 collection = "org-rag"
-directory =  "/Users/christian/Documents/personal/notes/content/roam/"
-index = f"{directory}/.chroma"
+directory = "/Users/christian/Documents/personal/notes/content/roam/"
+store = OrgModeDocumentStore(collection=collection, directory=directory)
 
-embeddings = OllamaEmbeddings(model="mixtral:latest")
-db = Chroma("org-rag", embeddings, persist_directory=index)
+i, query = 1, ""
+print("Enter search query at the prompt or type 'quit' to exit.")
+while not query == "quit":
+  query = input(f"{i}> ")
+  if query == "quit":
+    print("Goodbye.")
+  else:
+    i += 1
+    results = store.mmr_search(query)
+    for doc in results:
+      print(f"file: {doc.metadata['source']}")
+      print(f"length: {len(doc.page_content)}")
+      print(f"content: {doc.page_content}\n" )
 
-query = input("user> ")
-results = db.search(query, "mmr", fetch_k=10, lambda_mult=0.75)
-
-for doc in results:
-    print("*" * 80)
-    print(f"file: {doc.metadata['source']}, length: {len(doc.page_content)}")
-    print(f"content: {doc.page_content}\n\n" )
 #+end_src
 
 I'm not thrilled with these results. The chunks are very small and anecdotally

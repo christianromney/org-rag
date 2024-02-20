@@ -1,17 +1,18 @@
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
-
+from orgstore import OrgModeDocumentStore
 collection = "org-rag"
-directory =  "/Users/christian/Documents/personal/notes/content/roam/"
-index = f"{directory}/.chroma"
+directory = "/Users/christian/Documents/personal/notes/content/roam/"
+store = OrgModeDocumentStore(collection=collection, directory=directory)
 
-embeddings = OllamaEmbeddings(model="mixtral:latest")
-db = Chroma("org-rag", embeddings, persist_directory=index)
-
-query = input("user> ")
-results = db.search(query, "mmr", fetch_k=10, lambda_mult=0.75)
-
-for doc in results:
-    print("*" * 80)
-    print(f"file: {doc.metadata['source']}, length: {len(doc.page_content)}")
-    print(f"content: {doc.page_content}\n\n" )
+i, query = 1, ""
+print("Enter search query at the prompt or type 'quit' to exit.")
+while not query == "quit":
+  query = input(f"{i}> ")
+  if query == "quit":
+    print("Goodbye.")
+  else:
+    i += 1
+    results = store.mmr_search(query)
+    for doc in results:
+      print(f"file: {doc.metadata['source']}")
+      print(f"length: {len(doc.page_content)}")
+      print(f"content: {doc.page_content}\n" )
