@@ -51,7 +51,7 @@ jsonpath-python==1.0.6
 jsonpointer==2.4
 kubernetes==29.0.0
 lancedb==0.5.5
-langchain==0.1.7
+langchain==0.1.11
 langchain-community==0.0.20
 langchain-core==0.1.23
 langchain-openai==0.0.6
